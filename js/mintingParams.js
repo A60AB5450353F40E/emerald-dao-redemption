@@ -27,4 +27,4 @@ const wcMetadata = {
   icons: ['https://ipfs.pat.mn/ipfs/QmcNL1KcVmiDtwJe8WokrnzYeoHirsz1sNxNojncsxyb2p']
 };
 
-export { projectId, urlApiServer, tokenId, dustLimit, dustLimit, vaultReopenLocktime, maxSafeboxes, collectionSize, mintPriceSats, payoutAddress, numberOfThreads, network, wcMetadata };
+export { projectId, urlApiServer, tokenId, dustLimit, vaultReopenLocktime, maxSafeboxes, collectionSize, mintPriceSats, payoutAddress, numberOfThreads, network, wcMetadata };
