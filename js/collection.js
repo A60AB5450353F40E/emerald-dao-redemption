@@ -1,9 +1,12 @@
 import SignClient from '@walletconnect/sign-client';
 import { WalletConnectModal } from '@walletconnect/modal';
-import { ElectrumCluster, ElectrumTransport } from 'electrum-cash';
-import { ElectrumNetworkProvider } from "cashscript";
-import { projectId, urlApiServer, tokenId, network, wcMetadata } from "/js/mintingParams.js";
-import { bigIntToVmNumber, binToHex, hexToBin, vmNumberToBigInt } from '@bitauth/libauth';
+import { Contract, ElectrumNetworkProvider, SignatureTemplate } from "cashscript";
+import contractArtifact from "/js/safebox.json";
+import { decodeCashAddress, binToHex, hexToBin, vmNumberToBigInt, bigIntToVmNumber, encodeCashAddress, decodeTransaction,
+    cashAddressToLockingBytecode, stringify,
+    binToBigIntUintLE, lockingBytecodeToCashAddress, encodeLockingBytecodeP2sh20, hash160 } from '@bitauth/libauth';
+import { ElectrumClient, ElectrumCluster, ElectrumTransport } from 'electrum-cash';
+import { projectId, urlApiServer, tokenId, dustLimit, vaultReopenLocktime, maxSafeboxes, network, wcMetadata } from "/js/mintingParams.js";
 import { listMarkings, listWeapons, listBackgrounds, listEyes, listColors, listSpecials } from "/js/attributes.js";
 
 // Read URL Params
@@ -18,45 +21,33 @@ const itemsPerAttributeList = [9, 22, 14, 16, 22, 22, 1];
 const attributeNames = ["Markings", "Weapons", "Backgrounds", "Eyes", "Colors1", "Colors2", "Specials"];
 const attributeKeys = ["Marking", "Weapon", "Background", "Eyes", "Primary Color", "Secondary Color", "Specials"];
 
-// Create a custom 1-of-1 electrum cluster for bch-mainnet
-const electrumCluster = new ElectrumCluster('Cash-Ninjas', '1.5.1', 1, 1);
+// Create a custom 1-of-3 electrum cluster for bch-mainnet
+const electrumCluster = new ElectrumCluster('Emerald-DAO', '1.5.1', 1, 3);
 electrumCluster.addServer('fulcrum.greyh.at', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
+electrumCluster.addServer('bch.loping.net', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
+electrumCluster.addServer('electroncash.dk', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
 const electrum = network == "mainnet" ? electrumCluster : undefined;
 // Initialise cashscript ElectrumNetworkProvider
 const electrumServer = new ElectrumNetworkProvider(network, electrum);
 
-// Render Checkboxes
-checkboxLists.forEach((checkboxList, index) => {
-  const listName = "list" + attributeNames[index];
-  const Placeholder = document.getElementById(listName);
-  const divCheckboxList = document.createElement("div");
-  divCheckboxList.setAttribute("id", listName);
-  const template = document.getElementById("checkbox-template");
-  checkboxList.forEach(listItem => {
-    const checkboxTemplate = document.importNode(template.content, true);
-    // Set itemAttribute & itemCount checkbox
-    const itemAttribute = checkboxTemplate.getElementById("itemAttribute");
-    itemAttribute.textContent = listItem;
-    const itemCount = checkboxTemplate.getElementById("itemCount");
-    const attributeKey = attributeKeys[index];
-    const attributeString = (attributeKey + listItem).replace(/\s/g, '_');
-    itemCount.setAttribute("id", "itemCount" + attributeString);
-    // Set checkbox functionality
-    const checkbox = checkboxTemplate.getElementById("idInput");
-    checkbox.setAttribute("id", attributeString);
-    const label = checkboxTemplate.getElementById("forIdInput");
-    label.setAttribute("for", attributeString);
-    checkbox.onclick = () => displayNinjas();
-    // Add checkboxTemplate to list
-    divCheckboxList.appendChild(checkboxTemplate);
-  });
-  Placeholder.replaceWith(divCheckboxList);
-});
+// Client connection for event notifications
+const electrumClient = new ElectrumClient('Emerald-DAO', '1.5.1', 'bch.imaginary.cash', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
+
+const handleNewBlocks = (data) => {
+    console.log(`New block: ${data.height}`);
+    refreshBCHBalance();
+}
+
+async function setElectrumEvents() {
+    await electrumClient.connect();
+    electrumClient.on('notification', handleNewBlocks);
+    await electrumClient.subscribe(handleNewBlocks, 'blockchain.headers.subscribe');
+}
 
 // Fetch full BCMR file from server
-const fetchBcmrPromise = await fetch(urlApiServer + "/.well-known/bitcoin-cash-metadata-registry.json");
+const fetchBcmrPromise = await fetch(urlApiServer + "/bitcoin-cash-metadata-registry.json");
 const fetchBcmrResult = await fetchBcmrPromise.json();
-const nftMetadata = fetchBcmrResult.identities[tokenId]["2023-10-07T14:29:05.694Z"].token.nfts.parse.types;
+const nftMetadata = fetchBcmrResult.identities["180f0db4465c2af5ef9363f46bacde732fa6ffb3bfe65844452078085b2e7c93"]["2023-05-26T17:10:00.000Z"].token;
 
 // 1. Setup Client with relay server
 const signClient = await SignClient.init({
@@ -105,15 +96,31 @@ const requiredNamespaces = {
   },
 };
 
+// Global variables
+let unfilteredListNinjas = [];
+let ninjasConnectedWallet = [];
+let connectedUserAddress = "";
+let networkMTPUnix = 0;
+let networkMTPString;
+
 // Try to reconnect to previous session on startup
 let session;
-if (lastSession && !urlParamAddr && !displayFullCollection) setTimeout(async () => {
+if (lastSession) setTimeout(async () => {
   const confirmReuse = confirm("The collection page is going to re-use your previous WalletConnect session, make sure you have your wallet open");
   if (confirmReuse) {
     session = lastSession;
     fetchUserNinjas();
   }
 }, 500);
+else {
+  const { uri, approval } = await signClient.connect({ requiredNamespaces });
+  await walletConnectModal.openModal({ uri });
+  // Await session approval from the wallet.
+  session = await approval();
+  // Close the QRCode modal in case it was open.
+  walletConnectModal.closeModal();
+  fetchUserNinjas();
+};
 
 // If urlParam has address, load collection 
 if (urlParamAddr) setTimeout(async () => {
@@ -123,6 +130,14 @@ if (urlParamAddr) setTimeout(async () => {
 }, 500
 );
 
+async function refreshNinjas() {
+  const listCashninjas = await getNinjasOnAddr(urlParamAddr);
+  updateCollection(listCashninjas);
+  displayNinjas();
+}
+
+setElectrumEvents();
+
 if (displayFullCollection) setTimeout(async () => {
   let allNinjaNumbers = [];
   for (let i = 1; i <= 5000; i++) { allNinjaNumbers.push(i); }
@@ -131,43 +146,61 @@ if (displayFullCollection) setTimeout(async () => {
 }, 500
 );
 
-// Global variables
-let unfilteredListNinjas = [];
-let ninjasConnectedWallet = [];
-let connectedUserAddress = "";
-// Functionality fullCollection & myCollection buttons
-const fullCollectionButton = document.getElementById("FullCollection");
-const myCollectionButton = document.getElementById("myCollectionButton");
-fullCollectionButton.onclick = () => {
-  window.history.replaceState({}, "", `${location.pathname}?fullcollection`);
-  let allNinjaNumbers = [];
-  for (let i = 1; i <= 5000; i++) { allNinjaNumbers.push(i); }
-  updateCollection(allNinjaNumbers);
-  displayNinjas();
-};
-myCollectionButton.onclick = async () => {
-  if (session) fetchUserNinjas();
-  else {
-    const { uri, approval } = await signClient.connect({ requiredNamespaces });
-    await walletConnectModal.openModal({ uri });
-    // Await session approval from the wallet.
-    session = await approval();
-    // Close the QRCode modal in case it was open.
-    walletConnectModal.closeModal();
-    fetchUserNinjas();
-  };
-};
 async function fetchUserNinjas() {
   if (!ninjasConnectedWallet.length) {
     const userAddress = await getUserAddress();
     connectedUserAddress = userAddress;
     const listCashninjas = await getNinjasOnAddr(userAddress);
-    document.getElementById("myCollectionButton").textContent = `My Collection (${listCashninjas.length})`
+    //document.getElementById("myCollectionButton").textContent = `My Collection (${listCashninjas.length})`
     ninjasConnectedWallet = listCashninjas;
   }
   window.history.replaceState({}, "", `${location.pathname}?addr=${connectedUserAddress}`);
   updateCollection(ninjasConnectedWallet);
   displayNinjas();
+  refreshBCHBalance();
+}
+
+async function refreshBCHBalance() {
+  const el = document.getElementById("BCHBalance");
+  const elmtp = document.getElementById("NetworkMTP");
+  const elva = document.getElementById("VaultStatus");
+  el.textContent = `Wallet BCH Balance: loading...`;
+  elmtp.textContent = `Network MTP: updating...`;
+  elva.textContent = `Vault Status: updating...`;
+
+  const userAddress = await getUserAddress();
+  const userUtxos = await electrumServer.getUtxos(userAddress);
+  const filteredUserUtxos = userUtxos.filter(
+    val => !val.token
+  );
+  const bchBalanceUser = userUtxos.reduce((total, utxo) => utxo.token ? total : total + utxo.satoshis, 0n);
+  el.textContent = `Wallet BCH Balance: ${Number(bchBalanceUser)/100000000.0}`;
+
+  networkMTPUnix = await getMTP();
+  let dt=new Date(networkMTPUnix * 1000).toLocaleString();
+  elmtp.textContent = `Network MTP: ${networkMTPUnix}` + ` (${dt})` + ` (${network})`;
+  if(networkMTPUnix < Number(contractParams[1])) {
+    elva.textContent = `Vault Status: CLOSED`;
+  } else {
+    elva.textContent = `Vault Status: OPEN`;
+  }
+}
+
+async function getMTP() {
+    // get height
+    await new Promise(resolve => setTimeout(resolve, 500));
+    let height = await electrumServer.getBlockHeight();
+
+    // get last 11 headers
+    await new Promise(resolve => setTimeout(resolve, 500));
+    new Date().toLocaleString();
+    let headers = await electrumServer.performRequest("blockchain.block.headers", height-10, 11);
+    let blocktimes = [];
+    for(let i=0; i<11; i++) {
+        blocktimes[i] = Number(binToBigIntUintLE(hexToBin(headers.hex.substring(136+i*160,136+i*160+8))));
+    }
+    blocktimes.sort();
+    return blocktimes[5];
 }
 
 async function getNinjasOnAddr(address) {
@@ -176,9 +209,22 @@ async function getNinjasOnAddr(address) {
   const listCashninjas = [];
   cashNinjaUtxos.forEach(ninjaUtxo => {
     const ninjaCommitment = ninjaUtxo.token.nft.commitment;
-    const ninjaNumber = vmNumberToBigInt(hexToBin(ninjaCommitment)) + 1n;
-    listCashninjas.push(Number(ninjaNumber));
+    const ninjaNumber = (binToBigIntUintLE(hexToBin(ninjaCommitment.slice(0,4))) + 1n);
+    const ninjaAmount = binToBigIntUintLE(hexToBin(ninjaCommitment.slice(4,16)));
+    const keycardData = {['keycardNumber']: ninjaNumber, ['keycardAmount']: ninjaAmount, ['keycardCommitment']: ninjaCommitment};
+    listCashninjas.push(keycardData);
   });
+  listCashninjas.sort((a, b) => {
+      if (a.keycardNumber < b.keycardNumber) {
+        return -1;
+      }
+      if (a.keycardNumber == b.keycardNumber) {
+        return 0;
+      }
+      if (a.keycardNumber > b.keycardNumber) {
+        return 1;
+      }
+    });
   return listCashninjas;
 }
 
@@ -204,19 +250,43 @@ async function displayNinjas(offset = 0) {
   } else {
     // Render list of cashninjas
     const template = document.getElementById("ninja-template");
-    slicedArray.forEach(ninjaNumber => {
+    slicedArray.forEach(keycardData => {
       const ninjaTemplate = document.importNode(template.content, true);
       const ninjaImage = ninjaTemplate.getElementById("ninjaImage");
-      ninjaImage.src = urlApiServer + '/icons/' + ninjaNumber;
+      ninjaImage.src = urlApiServer + '/images/dao-pic.png';
       const ninjaName = ninjaTemplate.getElementById("ninjaName");
-      const ninjaCommitment = binToHex(bigIntToVmNumber(BigInt(ninjaNumber - 1)));
-      const ninjaData = nftMetadata[ninjaCommitment];
-      ninjaName.textContent = ninjaData?.name ?? `Ninja #${ninjaNumber}`;
-      const viewerLink = ninjaTemplate.getElementById("viewerLink");
-      viewerLink.href = './viewer.html?id=' + ninjaNumber;
+      const safeboxValue = ninjaTemplate.getElementById("safeboxValue");
+      const redeemButton = ninjaTemplate.getElementById("redeemButton");
+      ninjaName.textContent = `Emerald DAO Keycard #${keycardData.keycardNumber}`;
+      safeboxValue.textContent = `Safebox Value: ${Number(keycardData.keycardAmount)/100000000.0} BCH`;
+      redeemButton.id = `${keycardData.keycardCommitment}`;
+        try {
+          redeemButton.addEventListener('click', async () => {
+            console.log('click ' + redeemButton.id);
+            redeemNFT(redeemButton.id);
+          });
+        } catch (error) { console.log(error); }
+      
       ninjaList.appendChild(ninjaTemplate);
     });
     Placeholder.replaceWith(ninjaList);
+  }
+}
+
+async function signTransaction(options) {
+  try {
+    const result = await signClient.request({
+      chainId: connectedChain,
+      topic: session.topic,
+      request: {
+        method: "bch_signTransaction",
+        params: JSON.parse(stringify(options)),
+      },
+    });
+
+    return result;
+  } catch (error) {
+    return undefined;
   }
 }
 
@@ -236,6 +306,149 @@ async function getUserAddress() {
   }
 };
 
+// The array of parameters to use for generating the contract
+const contractParams = [
+  BigInt(dustLimit),
+  BigInt(vaultReopenLocktime),
+  BigInt(maxSafeboxes),
+];
+
+// Instantiate a new minting contract
+const options = { provider: electrumServer };
+const contract = new Contract(contractArtifact, contractParams, options);
+const p2sh20 = lockingBytecodeToCashAddress(encodeLockingBytecodeP2sh20(hash160(hexToBin(contract.bytecode))));
+
+async function redeemNFT(keycardCommitment) {
+  let confirmRedemption = false;
+  if(networkMTPUnix < Number(contractParams[1])) {
+      alert("Can not redeem yet, timelock hasn't expired yet.");
+      console.log('timelock not expired yet');
+  } else {
+    confirmRedemption = confirm("WARNING\n\nRedemption will burn the selected NFT #"+(binToBigIntUintLE(hexToBin(keycardCommitment.slice(0,4))) + 1n)+" in exchange for "+ Number(binToBigIntUintLE(hexToBin(keycardCommitment.slice(4,16))))/100000000.0 +" BCH value from the matching safebox.\nThe BCH will be deposited into the same address which held the NFT.\n\nDo you want to proceed?");
+  }
+  if(confirmRedemption) {
+      const mintButton = document.getElementById(keycardCommitment);
+      // Visual feedback for user, disable button onclick
+      mintButton.textContent = `Building transaction...`;
+      const prevClick = mintButton.onclick;
+      mintButton.onclick = () => { };
+
+      // Get userInput for mint
+      const userAddress = await getUserAddress();
+      console.log(userAddress);
+      const userUtxos = await electrumServer.getUtxos(userAddress);
+      const filteredUserUtxos = userUtxos.filter(
+        val => val?.token?.category == tokenId && val?.token?.nft.commitment == keycardCommitment
+      );
+      const userInput = filteredUserUtxos[0];
+
+      // Get matching safebox utxo
+      const contractAddress = p2sh20;
+      console.log(contractAddress);
+      const contractUtxos = await electrumServer.getUtxos(contractAddress);
+      const filteredContractUtxos = contractUtxos.filter(
+        val => val?.token?.category == tokenId && val?.token?.nft.commitment == keycardCommitment.slice(0,4)
+      );
+      const contractInput = filteredContractUtxos[0];
+      
+      // start transaction building
+      const sendAmount = userInput.satoshis + contractInput.satoshis - 400n;
+
+      // empty usersig
+      const userSig = new SignatureTemplate(Uint8Array.from(Array(32)));
+
+      function toTokenAddress(address) {
+        const addressInfo = decodeCashAddress(address);
+        const pkhPayoutBin = addressInfo.payload;
+        const prefix = network === "mainnet" ? 'bitcoincash' : 'bchtest';
+        const tokenAddress = encodeCashAddress(prefix, "p2pkhWithTokens", pkhPayoutBin);
+        return tokenAddress;
+      }
+
+      const transaction = contract.functions.OnlyOne()
+        .from(contractInput)
+        .fromP2PKH(userInput, userSig)
+        .to(userAddress, sendAmount)
+        .withMinChange(2100000000000000n)
+        .withoutTokenChange()
+        .withHardcodedFee(0)
+        .withTime(Number(contractParams[1]));
+      // end transaction building
+
+      console.log(transaction);
+
+      try {
+
+        const rawTransactionHex = await transaction.build();
+        const decodedTransaction = decodeTransaction(hexToBin(rawTransactionHex));
+        decodedTransaction.inputs[1].unlockingBytecode = Uint8Array.from([]);
+
+        // construct new transaction object for SourceOutputs, for stringify & not to mutate current network provider 
+        const listSourceOutputs = [{
+          ...decodedTransaction.inputs[0],
+          lockingBytecode: (cashAddressToLockingBytecode(contract.tokenAddress)).bytecode,
+          valueSatoshis: BigInt(contractInput.satoshis),
+          token: contractInput.token && {
+            ...contractInput.token,
+            category: hexToBin(contractInput.token.category),
+            nft: contractInput.token.nft && {
+              ...contractInput.token.nft,
+              commitment: hexToBin(contractInput.token.nft.commitment),
+            },
+          },
+          contract: {
+            abiFunction: transaction.abiFunction,
+            redeemScript: contract.redeemScript,
+            artifact: contract.artifact,
+          }
+        }, {
+          ...decodedTransaction.inputs[1],
+          lockingBytecode: (cashAddressToLockingBytecode(userAddress)).bytecode,
+          valueSatoshis: BigInt(userInput.satoshis),
+          token: userInput.token && {
+            ...userInput.token,
+            category: hexToBin(userInput.token.category),
+            nft: userInput.token.nft && {
+              ...userInput.token.nft,
+              commitment: hexToBin(userInput.token.nft.commitment),
+            },
+          },
+        }];
+
+        const wcTransactionObj = {
+          transaction: decodedTransaction,
+          sourceOutputs: listSourceOutputs,
+          broadcast: true,
+          userPrompt: "Redeem Emerald DAO NFT for BCH"
+        };
+
+        console.log(wcTransactionObj);
+        setTimeout(() => alert('Approve the redemption transaction in Cashonize'), 100);
+        const signResult = await signTransaction(wcTransactionObj);
+        console.log(signResult);
+
+        if (signResult) {
+          alert(`Redemption succesful! txid: ${signResult.signedTransactionHash}`);
+          console.log(`Redemption succesful! txid: ${signResult.signedTransactionHash}`);
+          mintButton.textContent = "Redeem Now";
+          refreshNinjas();
+          refreshBCHBalance();
+        } else {
+          alert('Redemption transaction cancelled');
+          console.log('Redemption transaction cancelled');
+          mintButton.textContent = "Redeem Now";
+          mintButton.onclick = prevClick;
+        }
+      } catch (error) {
+        alert(error);
+        console.log(error);
+        //cleanupFailedMint();
+      }
+  } else {
+      console.log('user bailed or timelock not expired');
+  }
+}
+
 function updateCollection(newCollection) {
   unfilteredListNinjas = newCollection;
   // Create obj of attributes object to track unique items
@@ -246,7 +459,7 @@ function updateCollection(newCollection) {
 
   // Create count of occurance for each attribute
   unfilteredListNinjas.forEach(ninjaNumber => {
-    const ninjaCommitment = binToHex(bigIntToVmNumber(BigInt(ninjaNumber - 1)));
+    const ninjaCommitment = 0;//binToHex(bigIntToVmNumber(BigInt(ninjaNumber - 1)));
     const ninjaData = nftMetadata[ninjaCommitment];
     const ninjaAttributes = ninjaData?.extensions.attributes;
 
@@ -262,29 +475,6 @@ function updateCollection(newCollection) {
         else attibuteObj[attributeValue] = 1;
       });
     }
-  });
-
-  // Display total counts
-  attributeNames.forEach((attributeName, index) => {
-    const idTotalCount = "number" + attributeName;
-    const totalCountDiv = document.getElementById(idTotalCount);
-    const attibuteObj = attributeObjs[attributeKeys[index]];
-    const countUniqueItems = Object.keys(attibuteObj).length;
-    const countDisplayString = (idTotalCount != "numberSpecials") ? countUniqueItems + "/" + itemsPerAttributeList[index] : countUniqueItems;
-    totalCountDiv.textContent = countDisplayString;
-  });
-
-  // display Indvidual Counts
-  checkboxLists.forEach((checkboxList, index) => {
-    checkboxList.forEach(listItem => {
-      const attributeKey = attributeKeys[index];
-      const attributeString = (attributeKey + listItem).replace(/\s/g, '_');
-      const itemCountElem = document.getElementById("itemCount" + attributeString);
-      const attibuteObj = attributeObjs[attributeKey];
-      let itemCount = attibuteObj[listItem];
-      if (listItem == "All Specials") itemCount = Object.keys(attributeObjs[attributeKey]).length;
-      itemCountElem.textContent = itemCount ?? 0;
-    });
   });
 }
 
@@ -380,39 +570,5 @@ function renderPagination(offset, listLength) {
 
 // Fuctions for filtering the NinjaList
 function filterNinjaList(listCashninjas) {
-  const checkboxes = document.getElementsByName("checkbox");
-  // Keeps track of the filtering, updated after each category
-  let filteredNinjaList = listCashninjas;
-  let sumItemCountCategories = 0;
-  // Filtering within category interpreted as OR, across category as AND
-  for (const [categoryNr, nrItems] of itemsPerAttributeList.entries()) {
-    // Keeps track of the items in a category, becomes new filteredNinjaList at end of category and starts fresh again
-    let categoryList = [];
-    let hasFiltered = false;
-    for (let i = 0; i < nrItems; i++) {
-      const checkboxNr = sumItemCountCategories + i;
-      const checkbox = checkboxes[checkboxNr];
-      if (checkbox.checked) {
-        hasFiltered = true;
-        const categoryToFilterOn = attributeKeys[categoryNr];
-        const classToFilter = checkbox.id;
-        const attributeToFilterOn = classToFilter.replace(/_/g, ' ').replace(categoryToFilterOn, "");
-        // Filters the current NFT list
-        filteredNinjaList.forEach(ninjaNumber => {
-          const ninjaCommitment = binToHex(bigIntToVmNumber(BigInt(ninjaNumber - 1)));
-          const ninjaData = nftMetadata[ninjaCommitment];
-          const ninjaAttributes = ninjaData?.extensions.attributes;
-          // Only run these check for ninja numbers with metadata available
-          if (ninjaAttributes) {
-            if (ninjaAttributes[categoryToFilterOn] == attributeToFilterOn) categoryList.push(ninjaNumber);
-            if (categoryToFilterOn == "Specials" && ninjaAttributes[categoryToFilterOn]) categoryList.push(ninjaNumber);
-          }
-        });
-      }
-    }
-    // If category has filtered, set new filteredList for next category
-    if (hasFiltered) filteredNinjaList = categoryList;
-    sumItemCountCategories += nrItems;
-  }
-  return filteredNinjaList;
+  return listCashninjas;
 }

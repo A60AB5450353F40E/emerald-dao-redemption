@@ -1,0 +1,30 @@
+{
+  "contractName": "Safebox",
+  "constructorInputs": [
+    {
+      "name": "dustLimit",
+      "type": "int"
+    },
+    {
+      "name": "vaultReopenLocktime",
+      "type": "int"
+    },
+    {
+      "name": "maxSafeboxes",
+      "type": "int"
+    }
+  ],
+  "abi": [
+    {
+      "name": "OnlyOne",
+      "inputs": []
+    }
+  ],
+  "bytecode": "OP_INPUTINDEX OP_UTXOVALUE OP_LESSTHANOREQUAL OP_INPUTINDEX OP_UTXOTOKENCATEGORY OP_SIZE OP_NIP 20 OP_NUMEQUAL OP_BOOLAND OP_INPUTINDEX OP_UTXOTOKENCOMMITMENT OP_SIZE OP_NIP OP_2 OP_NUMEQUAL OP_BOOLAND OP_INPUTINDEX OP_UTXOTOKENCOMMITMENT OP_BIN2NUM OP_0 OP_4 OP_ROLL OP_1ADD OP_WITHIN OP_BOOLAND OP_INPUTINDEX OP_UTXOTOKENAMOUNT OP_0 OP_NUMEQUAL OP_BOOLAND OP_IF OP_DUP OP_CHECKLOCKTIMEVERIFY OP_DROP OP_INPUTINDEX OP_0 OP_NUMEQUALVERIFY OP_TXINPUTCOUNT OP_2 OP_NUMEQUALVERIFY OP_0 OP_UTXOTOKENCATEGORY OP_1 OP_UTXOTOKENCATEGORY OP_EQUALVERIFY OP_0 OP_UTXOTOKENCOMMITMENT OP_1 OP_UTXOTOKENCOMMITMENT OP_2 OP_SPLIT OP_DROP OP_EQUALVERIFY OP_TXOUTPUTCOUNT OP_1 OP_NUMEQUALVERIFY OP_0 OP_OUTPUTTOKENCATEGORY OP_0 OP_EQUALVERIFY OP_0 OP_OUTPUTBYTECODE OP_1 OP_UTXOBYTECODE OP_EQUALVERIFY OP_ENDIF OP_DROP OP_1",
+  "source": "pragma cashscript >0.8.0;\n\n// Emerald DAO Safebox v2.1.0\n\n// Withdrawal TX Form\n//   - Locktime: must be greater than DAO's vaultReopenLocktime\n//   - Inputs:\n//     - 00: this (Safebox)\n//     - 01: matching keycard NFT\n//   - Outputs:\n//     - 00: BCH destination, same address as keycard NFT's prevout\ncontract Safebox(\n    int dustLimit,\n    int vaultReopenLocktime,\n    int maxSafeboxes\n) {\n    function OnlyOne() {\n        // If valid Safebox UTXO\n        if(\n            tx.inputs[this.activeInputIndex].value >= dustLimit &&\n            tx.inputs[this.activeInputIndex].tokenCategory.length == 32 &&\n            tx.inputs[this.activeInputIndex].nftCommitment.length == 2 &&\n            within(int(tx.inputs[this.activeInputIndex].nftCommitment),\n                0, maxSafeboxes + 1) &&\n            tx.inputs[this.activeInputIndex].tokenAmount == 0\n        ) {\n            // Timelock must expire before users will be allowed to\n            // withdraw from their safeboxes.\n            require(tx.time >= vaultReopenLocktime);\n\n            // Ensure this contract has correct input index\n            require(this.activeInputIndex == 0);\n\n            // Require exactly 2 inputs:\n            // - inputs[0] is this contract, the safebox\n            // - inputs[1] is the matching keycard\n            require(tx.inputs.length == 2);\n\n            // Verify safebox category matches the keycard's category\n            // Note: if DAO was correctly instanced, then Vault contract ensures\n            // these will be immutable NFTs so we don't need to check NFT capability\n            // here.\n            require(\n                tx.inputs[0].tokenCategory\n                == tx.inputs[1].tokenCategory\n            );\n\n            // Verify safebox serial number == keycard serial number\n            // Note: Vault contract ensures 1-to-1 mapping\n            require(\n                tx.inputs[0].nftCommitment\n                == tx.inputs[1].nftCommitment.split(2)[0]\n            );\n\n            // Require exactly 1 output: the BCH withdrawal output\n            require(tx.outputs.length == 1);\n\n            // No need to check for BCH amount of it, keycard spender's signeture\n            // covers it and the signer decides how much to leave out for fee.\n            // SIGHASH_ONE can't pass this TX since output-1 can't exist, so safe to\n            // use the keycard NFT in CoinJoin TXes.\n\n            // Verify that output category == 0\n            // This means that the pair of NFTs is implicitly burned together\n            require(tx.outputs[0].tokenCategory == 0x);\n\n            // Verify BCH is paid to same address that keycard NFT came from\n            require(tx.outputs[0].lockingBytecode == tx.inputs[1].lockingBytecode);\n        }\n        // Else polluting UTXO,\n        // allow BCH to be claimed by anyone.\n    }\n}\n",
+  "compiler": {
+    "name": "cashc",
+    "version": "0.9.2"
+  },
+  "updatedAt": "2024-03-07T19:03:00.752Z"
+}
