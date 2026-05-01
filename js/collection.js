@@ -24,7 +24,7 @@ const attributeKeys = ["Marking", "Weapon", "Background", "Eyes", "Primary Color
 // Create a custom 1-of-3 electrum cluster for bch-mainnet
 const electrumCluster = new ElectrumCluster('Emerald-DAO', '1.5.1', 1, 3);
 electrumCluster.addServer('fulcrum.greyh.at', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
-electrumCluster.addServer('bch.loping.net', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
+electrumCluster.addServer('electrum.imaginary.cash', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
 electrumCluster.addServer('electroncash.dk', ElectrumTransport.WSS.Port, ElectrumTransport.WSS.Scheme);
 const electrum = network == "mainnet" ? electrumCluster : undefined;
 // Initialise cashscript ElectrumNetworkProvider
